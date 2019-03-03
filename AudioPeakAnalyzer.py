@@ -7,7 +7,7 @@
 
 
 from PySide import QtCore, QtGui
-import wave,numpy,re,sfm,sfmClipEditor,vs 
+import wave,numpy,re,sfm,sfmClipEditor,sfmApp,vs ,os,array
 
 class AudioFileAnalyze(object):
     
@@ -21,7 +21,7 @@ class AudioFileAnalyze(object):
         if overwriteChunk:
             self.chunk=overwriteChunk
         else:
-            self.chunk=float(self.wf.getframerate()/sfmApp.GetFramesPerSecond())#each chunk is roughly one frame long
+            self.chunk=int(self.wf.getframerate()/sfmApp.GetFramesPerSecond())#each chunk is roughly one frame long
 
         print(
         """
@@ -39,11 +39,21 @@ Audio File Info:
         self.progressbarWindow.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint)
 
         self.progressbar = QtGui.QProgressBar(self.progressbarWindow)
-        self.progressbar.resize(600,30) 
+        self.progressbar.resize(600,30)
+        
+        fmt_size = "h" if self.wf.getsampwidth() == 2 else "i"
+        
+        self.DatawaveArray = array.array(fmt_size)
+        self.DatawaveArray.fromfile(open(wavefile, 'rb'), os.path.getsize(wavefile)//self.DatawaveArray.itemsize)
+        self.DatawaveArray = self.DatawaveArray[44//self.wf.getsampwidth():]
+        self.DatawaveArray=list(self.divide_chunks(self.DatawaveArray, int(self.chunk)))
 
 
 
-    
+
+    def divide_chunks(self,l, n):
+        for i in range(0, len(l), n):
+            yield l[i:i + n]
 
 
         #return sfm frame time of a single buffer
@@ -64,24 +74,64 @@ Audio File Info:
 
         #reads a single chunk
         data = self.wf.readframes(int(self.chunk))
+        swidth = self.wf.getsampwidth()
+        RATE = self.wf.getframerate()
+        # use a Blackman window
+       # window = numpy.blackman(self.chunk)
+        
 
+
+
+
+
+         
+        index=0
+        datachunk=self.DatawaveArray[index]
+        print len(data), self.chunk
         #loops though entire wav file
-        while data != '':
+        while len(datachunk) == self.chunk:
+            
             self.progressbar.setValue(self.progressbar.value()+1)
             
             #temp array holds the data points from the chunk
-            dataarray = numpy.fromstring(data,dtype=numpy.int16)
-            
+           # dataarray = numpy.array(wave.struct.unpack("%dh"%(len(data)/swidth),\
+                                       #  data))*window
+
+           
             #after averaging the array to a single value appends it to the out array
-            dataValue.append(float(numpy.average(numpy.abs(dataarray))*2)/2.0**15)   
+           # datachunk=numpy.array(datachunk)
+          #  datachunk=datachunk[datachunk>=0]
+            dataValue.append(float(numpy.max((datachunk)))/2.0**15)
+            
+            # Take the fft and square each value
+            fftData=abs(numpy.fft.rfft(datachunk))**2
+            # find the maximum
+            which = fftData[1:].argmax() + 1
+            
+            # use quadratic interpolation around the max
+            if which != len(fftData)-1:
+                y0,y1,y2 = numpy.log(fftData[which-1:which+2:])
+                x1 = (y2 - y0) * .5 / (2 * y1 - y2 - y0)
+                 #find the frequency and output it
+                thefreq = (which+x1)*RATE/self.chunk
+              #  print "The freq is %f Hz." %(thefreq)
+            else:
+                thefreq = which*RATE/self.chunk
+
+
+
+
+
+
             
             #checks if we hit the endframe
-            if self.wf.tell() >= (float(self.wf.getframerate()/sfmApp.GetFramesPerSecond())*duration):
+         #   if self.wf.tell() >= (float(RATE/sfmApp.GetFramesPerSecond())*duration):
+            if index >= (float(RATE/sfmApp.GetFramesPerSecond())*duration)//self.chunk:
                 break    
             
-            data = self.wf.readframes(int(self.chunk))
-
-
+           # data = self.wf.readframes(int(self.chunk))
+            index+=1
+            datachunk=self.DatawaveArray[index]
         
         self.wf.close()
 
@@ -206,12 +256,12 @@ class Audio_Dialog(object):
         ##key=control name: value=[min value,max value]
         controldict={}
         
-        for index in range(1,self.control_toolBox.count ()):
+        for index in range(self.control_toolBox.count ()):
 
-            if self.control_toolBox.widget(index).findChild(QtGui.QGroupBox).isChecked():
+            if self.control_toolBox.widget(index).IsEnabled():
                 
-                minvalue= self.control_toolBox.widget(index).findChild(QtGui.QDoubleSpinBox,"doubleSpinBox_minvalue").value()
-                maxvalue= self.control_toolBox.widget(index).findChild(QtGui.QDoubleSpinBox,"doubleSpinBox_maxvalue").value()
+                minvalue,maxvalue= self.control_toolBox.widget(index).GetValueRange()
+               
                 controldict[self.control_toolBox.itemText(index)]=[minvalue,maxvalue]
 
         ####
@@ -245,6 +295,11 @@ class Audio_Dialog(object):
         #loop though the dict 
         for control in controldict.keys():
 
+            beforetime=vs.DmeTime_t(5.0+((startFramevalue-1) * (1.0 / sfmApp.GetFramesPerSecond())))
+            val=self.animset.FindControl(str(control)).channel.log.GetValue(beforetime)
+            self.AddKeyFrame(str(control),beforetime,
+                                 self.animset.FindControl(str(control)).channel.log.GetValue(beforetime))
+            
             #loop though data array
             for index in range(len(dataValue)):
                 
@@ -253,6 +308,10 @@ class Audio_Dialog(object):
                                  dataValue[index],controldict[control][0],controldict[control][1])
                 
                 self.audioAnalyze.progressbar.setValue(self.audioAnalyze.progressbar.value() + 1)
+
+            
+            
+            self.AddKeyFrame(str(control),vs.DmeTime_t(5.0+((endFramevalue+1) * (1.0 / sfmApp.GetFramesPerSecond()))),val)
 
 
 
@@ -266,10 +325,21 @@ class Audio_Dialog(object):
         #time:vs.DmeTime_t
         #value:float
     def AddKeyFrame(self,controlName,time,value,low=0.0,high=1.0):
-        if self.addBookmarkCheckBox.isChecked():
-            self.animset.FindControl(controlName).channel.log.AddBookmark(time,0)	
+
+
         
-        self.animset.FindControl(controlName).channel.log.FindOrAddKey(time,vs.DmeTime_t(10000),numpy.clip(value,low,high))        
+        if self.addBookmarkCheckBox.isChecked():
+            if self.animset.FindControl(controlName).HasAttribute("rightvaluechannel"):
+                self.animset.FindControl(controlName).rightvaluechannel.log.AddBookmark(time,0)
+                self.animset.FindControl(controlName).leftvaluechannel.log.AddBookmark(time,0)
+            else:
+                self.animset.FindControl(controlName).channel.log.AddBookmark(time,0)	
+
+        if self.animset.FindControl(controlName).HasAttribute("rightvaluechannel"):
+            self.animset.FindControl(controlName).rightvaluechannel.log.FindOrAddKey(time,vs.DmeTime_t(10000),numpy.clip(value,low,high))
+            self.animset.FindControl(controlName).leftvaluechannel.log.FindOrAddKey(time,vs.DmeTime_t(10000),numpy.clip(value,low,high)) 
+        else:
+            self.animset.FindControl(controlName).channel.log.FindOrAddKey(time,vs.DmeTime_t(1.0),numpy.clip(value,low,high))        
         
         
  
@@ -337,145 +407,116 @@ class Audio_Dialog(object):
         
         for element in self.animset.controls:
             if type(element) is vs.datamodel.CDmElement:
-                self.AddControlTab(element.name)     
+		self.control_toolBox.addItem(TemplateControlPageWidget(),str(element.name))
+               # self.AddControlTab(element.name)     
         
 
     def setupUi(self, Dialog):
-
-        Dialog.setObjectName("Dialog")
-        Dialog.resize(660, 316)
-        sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Fixed, QtGui.QSizePolicy.Preferred)
-        sizePolicy.setHorizontalStretch(0)
-        sizePolicy.setVerticalStretch(0)
-        sizePolicy.setHeightForWidth(Dialog.sizePolicy().hasHeightForWidth())
-        Dialog.setSizePolicy(sizePolicy)
-        Dialog.setMinimumSize(QtCore.QSize(660, 0))
-        Dialog.setMaximumSize(QtCore.QSize(660, 16777215))
-        self.verticalLayout = QtGui.QVBoxLayout(Dialog)
-        self.verticalLayout.setObjectName("verticalLayout")
-        self.gridLayout = QtGui.QGridLayout()
-        self.gridLayout.setObjectName("gridLayout")
+	Dialog.setObjectName("Dialog")
+	Dialog.setWindowModality(QtCore.Qt.ApplicationModal)
+	Dialog.resize(660, 500)
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Fixed, QtGui.QSizePolicy.Preferred)
+	sizePolicy.setHorizontalStretch(0)
+	sizePolicy.setVerticalStretch(0)
+	sizePolicy.setHeightForWidth(Dialog.sizePolicy().hasHeightForWidth())
+	Dialog.setSizePolicy(sizePolicy)
+	Dialog.setMinimumSize(QtCore.QSize(660, 0))
+	Dialog.setMaximumSize(QtCore.QSize(660, 16777215))
+	font = QtGui.QFont()
+	font.setPointSize(10)
+	Dialog.setFont(font)
+	Dialog.setFocusPolicy(QtCore.Qt.TabFocus)
+	Dialog.setSizeGripEnabled(True)
+	Dialog.setModal(True)
+	self.verticalLayout = QtGui.QVBoxLayout(Dialog)
+	self.verticalLayout.setObjectName("verticalLayout")
+	self.MiscBox = QtGui.QGroupBox(Dialog)
+	self.MiscBox.setFlat(False)
+	self.MiscBox.setCheckable(False)
+	self.MiscBox.setObjectName("MiscBox")
+	self.verticalLayout_2 = QtGui.QVBoxLayout(self.MiscBox)
+	self.verticalLayout_2.setObjectName("verticalLayout_2")
+	self.scrollArea = QtGui.QScrollArea(self.MiscBox)
+	self.scrollArea.setFrameShape(QtGui.QFrame.NoFrame)
+	self.scrollArea.setWidgetResizable(True)
+	self.scrollArea.setObjectName("scrollArea")
+	self.scrollAreaWidgetContents = QtGui.QWidget()
+	self.scrollAreaWidgetContents.setGeometry(QtCore.QRect(0, 0, 622, 164))
+	self.scrollAreaWidgetContents.setObjectName("scrollAreaWidgetContents")
+	self.verticalLayout_3 = QtGui.QVBoxLayout(self.scrollAreaWidgetContents)
+	self.verticalLayout_3.setObjectName("verticalLayout_3")
+	self.control_toolBox = QtGui.QToolBox(self.scrollAreaWidgetContents)
+	self.control_toolBox.setEnabled(True)
+	self.control_toolBox.setFrameShape(QtGui.QFrame.NoFrame)
+	self.control_toolBox.setFrameShadow(QtGui.QFrame.Plain)
+	self.control_toolBox.setLineWidth(2)
+	self.control_toolBox.setMidLineWidth(1)
+	self.control_toolBox.setObjectName("control_toolBox")
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Fixed)
+	self.control_toolBox.setSizePolicy(sizePolicy)
 	
-
-        self.verticalLayout.addLayout(self.gridLayout)
-        self.scrollArea = QtGui.QScrollArea(Dialog)
-        self.scrollArea.setFrameShape(QtGui.QFrame.NoFrame)
-        self.scrollArea.setWidgetResizable(True)
-        self.scrollArea.setObjectName("scrollArea")
-        self.scrollAreaWidgetContents = QtGui.QWidget()
-        self.scrollAreaWidgetContents.setGeometry(QtCore.QRect(0, 0, 642, 241))
-        self.scrollAreaWidgetContents.setObjectName("scrollAreaWidgetContents")
-        self.verticalLayout_3 = QtGui.QVBoxLayout(self.scrollAreaWidgetContents)
-        self.verticalLayout_3.setObjectName("verticalLayout_3")
-        self.MiscBox = QtGui.QGroupBox(self.scrollAreaWidgetContents)
-        self.MiscBox.setFlat(False)
-        self.MiscBox.setCheckable(False)
-        self.MiscBox.setObjectName("MiscBox")
-        self.verticalLayout_2 = QtGui.QVBoxLayout(self.MiscBox)
-        self.verticalLayout_2.setObjectName("verticalLayout_2")
-        self.control_toolBox = QtGui.QToolBox(self.MiscBox)
-        self.control_toolBox.setEnabled(True)
-        self.control_toolBox.setFrameShape(QtGui.QFrame.NoFrame)
-        self.control_toolBox.setFrameShadow(QtGui.QFrame.Plain)
-        self.control_toolBox.setLineWidth(2)
-        self.control_toolBox.setMidLineWidth(1)
-        self.control_toolBox.setObjectName("control_toolBox")
-        self.page_bright = QtGui.QWidget()
-        self.page_bright.setGeometry(QtCore.QRect(0, 0, 604, 132))
-        self.page_bright.setObjectName("page_bright")
-        self.horizontalLayout = QtGui.QHBoxLayout(self.page_bright)
-        self.horizontalLayout.setObjectName("horizontalLayout")
+	#self.control_toolBox.addItem(TemplateControlPageWidget(), "test")
 	
-        #self.label_2 = QtGui.QLabel(self.page_bright)
-        #sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Maximum, QtGui.QSizePolicy.Preferred)
-        #sizePolicy.setHorizontalStretch(0)
-        #sizePolicy.setVerticalStretch(0)
-        #sizePolicy.setHeightForWidth(self.label_2.sizePolicy().hasHeightForWidth())
-        #self.label_2.setSizePolicy(sizePolicy)
-        #self.label_2.setObjectName("label_2")
-        #self.horizontalLayout.addWidget(self.label_2)
-        #self.startFrameSpinBox = QtGui.QSpinBox(self.page_bright)
-        #sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Maximum, QtGui.QSizePolicy.Fixed)
-        #sizePolicy.setHorizontalStretch(0)
-        #sizePolicy.setVerticalStretch(0)
-        #sizePolicy.setHeightForWidth(self.startFrameSpinBox.sizePolicy().hasHeightForWidth())
-        #self.startFrameSpinBox.setSizePolicy(sizePolicy)
-        #self.startFrameSpinBox.setAccelerated(True)
-        #self.startFrameSpinBox.setCorrectionMode(QtGui.QAbstractSpinBox.CorrectToNearestValue)
-        #self.startFrameSpinBox.setMaximum(999999999)
-        #self.startFrameSpinBox.setObjectName("startFrameSpinBox")
-        #self.horizontalLayout.addWidget(self.startFrameSpinBox)
-        #self.label = QtGui.QLabel(self.page_bright)
-        #sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Maximum, QtGui.QSizePolicy.Preferred)
-        #sizePolicy.setHorizontalStretch(0)
-        #sizePolicy.setVerticalStretch(0)
-        #sizePolicy.setHeightForWidth(self.label.sizePolicy().hasHeightForWidth())
-        #self.label.setSizePolicy(sizePolicy)
-        #self.label.setObjectName("label")
-        #self.horizontalLayout.addWidget(self.label)
-        #self.endFrameSpinBox = QtGui.QSpinBox(self.page_bright)
-        #sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Fixed, QtGui.QSizePolicy.Fixed)
-        #sizePolicy.setHorizontalStretch(0)
-        #sizePolicy.setVerticalStretch(0)
-        #sizePolicy.setHeightForWidth(self.endFrameSpinBox.sizePolicy().hasHeightForWidth())
-        #self.endFrameSpinBox.setSizePolicy(sizePolicy)
-        #self.endFrameSpinBox.setMaximum(99999999)
-        #self.endFrameSpinBox.setObjectName("endFrameSpinBox")
-        #self.horizontalLayout.addWidget(self.endFrameSpinBox)
-	
-        self.line = QtGui.QFrame(self.page_bright)
-        self.line.setFrameShape(QtGui.QFrame.VLine)
-        self.line.setFrameShadow(QtGui.QFrame.Sunken)
-        self.line.setObjectName("line")
-        self.horizontalLayout.addWidget(self.line)
-        self.addBookmarkCheckBox = QtGui.QCheckBox(self.page_bright)
-        sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Fixed, QtGui.QSizePolicy.Fixed)
-        sizePolicy.setHorizontalStretch(0)
-        sizePolicy.setVerticalStretch(0)
-        sizePolicy.setHeightForWidth(self.addBookmarkCheckBox.sizePolicy().hasHeightForWidth())
-        self.addBookmarkCheckBox.setSizePolicy(sizePolicy)
-        self.addBookmarkCheckBox.setTristate(False)
-        self.addBookmarkCheckBox.setObjectName("addBookmarkCheckBox")
-        self.horizontalLayout.addWidget(self.addBookmarkCheckBox)
-        self.line_2 = QtGui.QFrame(self.page_bright)
-        self.line_2.setFrameShape(QtGui.QFrame.VLine)
-        self.line_2.setFrameShadow(QtGui.QFrame.Sunken)
-        self.line_2.setObjectName("line_2")
-        self.horizontalLayout.addWidget(self.line_2)
-        self.checkBox_overrideBuffer = QtGui.QCheckBox(self.page_bright)
-        sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Fixed, QtGui.QSizePolicy.Fixed)
-        sizePolicy.setHorizontalStretch(0)
-        sizePolicy.setVerticalStretch(0)
-        sizePolicy.setHeightForWidth(self.checkBox_overrideBuffer.sizePolicy().hasHeightForWidth())
-        self.checkBox_overrideBuffer.setSizePolicy(sizePolicy)
-        self.checkBox_overrideBuffer.setObjectName("checkBox_overrideBuffer")
-        self.horizontalLayout.addWidget(self.checkBox_overrideBuffer)
-        self.spinBox_buffer = QtGui.QSpinBox(self.page_bright)
-        self.spinBox_buffer.setEnabled(False)
-        self.spinBox_buffer.setMinimum(2)
-        self.spinBox_buffer.setMaximum(32768)
-        self.spinBox_buffer.setSingleStep(1)
-        self.spinBox_buffer.setProperty("value", 2048)
-        self.spinBox_buffer.setObjectName("spinBox_buffer")
+	###########
+	self.verticalLayout_3.addWidget(self.control_toolBox)
+	self.scrollArea.setWidget(self.scrollAreaWidgetContents)
+	self.verticalLayout_2.addWidget(self.scrollArea)
+	self.verticalLayout.addWidget(self.MiscBox)
+	self.groupBox = QtGui.QGroupBox(Dialog)
+	self.groupBox.setObjectName("groupBox")
+	self.verticalLayout_4 = QtGui.QVBoxLayout(self.groupBox)
+	self.verticalLayout_4.setObjectName("verticalLayout_4")
+	self.horizontalLayout_3 = QtGui.QHBoxLayout()
+	self.horizontalLayout_3.setObjectName("horizontalLayout_3")
+	self.addBookmarkCheckBox = QtGui.QCheckBox(self.groupBox)
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Fixed, QtGui.QSizePolicy.Fixed)
+	sizePolicy.setHorizontalStretch(0)
+	sizePolicy.setVerticalStretch(0)
+	sizePolicy.setHeightForWidth(self.addBookmarkCheckBox.sizePolicy().hasHeightForWidth())
+	self.addBookmarkCheckBox.setSizePolicy(sizePolicy)
+	self.addBookmarkCheckBox.setToolTip("")
+	self.addBookmarkCheckBox.setWhatsThis("")
+	self.addBookmarkCheckBox.setTristate(False)
+	self.addBookmarkCheckBox.setObjectName("addBookmarkCheckBox")
+	self.horizontalLayout_3.addWidget(self.addBookmarkCheckBox)
+	self.line = QtGui.QFrame(self.groupBox)
+	self.line.setFrameShape(QtGui.QFrame.VLine)
+	self.line.setFrameShadow(QtGui.QFrame.Sunken)
+	self.line.setObjectName("line")
+	self.horizontalLayout_3.addWidget(self.line)
+	self.checkBox_overrideBuffer = QtGui.QCheckBox(self.groupBox)
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Fixed, QtGui.QSizePolicy.Fixed)
+	sizePolicy.setHorizontalStretch(0)
+	sizePolicy.setVerticalStretch(0)
+	sizePolicy.setHeightForWidth(self.checkBox_overrideBuffer.sizePolicy().hasHeightForWidth())
+	self.checkBox_overrideBuffer.setSizePolicy(sizePolicy)
+	self.checkBox_overrideBuffer.setObjectName("checkBox_overrideBuffer")
+	self.horizontalLayout_3.addWidget(self.checkBox_overrideBuffer)
+	self.spinBox_buffer = QtGui.QSpinBox(self.groupBox)
+	self.spinBox_buffer.setEnabled(False)
 	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Maximum, QtGui.QSizePolicy.Fixed)
 	sizePolicy.setHorizontalStretch(0)
 	sizePolicy.setVerticalStretch(0)
 	sizePolicy.setHeightForWidth(self.spinBox_buffer.sizePolicy().hasHeightForWidth())
-	self.spinBox_buffer.setSizePolicy(sizePolicy)	
-        self.horizontalLayout.addWidget(self.spinBox_buffer)
-        self.control_toolBox.addItem(self.page_bright, "")
-        #
-
-        self.verticalLayout_2.addWidget(self.control_toolBox)
-        self.verticalLayout_3.addWidget(self.MiscBox)
-        self.scrollArea.setWidget(self.scrollAreaWidgetContents)
-        self.verticalLayout.addWidget(self.scrollArea)
-        self.buttonBox = QtGui.QDialogButtonBox(Dialog)
-        self.buttonBox.setOrientation(QtCore.Qt.Horizontal)
-        self.buttonBox.setStandardButtons(QtGui.QDialogButtonBox.Ok)
-        self.buttonBox.setObjectName("buttonBox")
-        self.verticalLayout.addWidget(self.buttonBox)
-
+	self.spinBox_buffer.setSizePolicy(sizePolicy)
+	self.spinBox_buffer.setAccelerated(True)
+	self.spinBox_buffer.setCorrectionMode(QtGui.QAbstractSpinBox.CorrectToNearestValue)
+	self.spinBox_buffer.setMinimum(32)
+	self.spinBox_buffer.setMaximum(65536)
+	self.spinBox_buffer.setSingleStep(1)
+	self.spinBox_buffer.setObjectName("spinBox_buffer")
+	self.horizontalLayout_3.addWidget(self.spinBox_buffer)
+	spacerItem = QtGui.QSpacerItem(40, 20, QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Minimum)
+	self.horizontalLayout_3.addItem(spacerItem)
+	self.verticalLayout_4.addLayout(self.horizontalLayout_3)
+	self.verticalLayout.addWidget(self.groupBox)
+	self.buttonBox = QtGui.QDialogButtonBox(Dialog)
+	self.buttonBox.setOrientation(QtCore.Qt.Horizontal)
+	self.buttonBox.setStandardButtons(QtGui.QDialogButtonBox.Ok)
+	self.buttonBox.setObjectName("buttonBox")
+	self.verticalLayout.addWidget(self.buttonBox)
+	
+      
         self.retranslateUi(Dialog)
         self.control_toolBox.setCurrentIndex(0)
         self.control_toolBox.layout().setSpacing(8)
@@ -504,16 +545,188 @@ class Audio_Dialog(object):
 
 
     def retranslateUi(self, Dialog):
-        Dialog.setWindowTitle(QtGui.QApplication.translate("Dialog", "Audio Peak Analyzer v1.0", None, QtGui.QApplication.UnicodeUTF8))
+        Dialog.setWindowTitle(QtGui.QApplication.translate("Dialog", "Audio Peak Analyzer v1.1", None, QtGui.QApplication.UnicodeUTF8))
 
-        self.MiscBox.setTitle(QtGui.QApplication.translate("Dialog", "light control options", None, QtGui.QApplication.UnicodeUTF8))
-        #self.label_2.setText(QtGui.QApplication.translate("Dialog", "Start Frame", None, QtGui.QApplication.UnicodeUTF8))
-        self.addBookmarkCheckBox.setText(QtGui.QApplication.translate("Dialog", "Add Bookmarks", None, QtGui.QApplication.UnicodeUTF8))
-        self.control_toolBox.setItemText(self.control_toolBox.indexOf(self.page_bright), QtGui.QApplication.translate("Dialog", "Misc", None, QtGui.QApplication.UnicodeUTF8))
-        #self.label.setText(QtGui.QApplication.translate("Dialog", "End Frame", None, QtGui.QApplication.UnicodeUTF8))
-        self.checkBox_overrideBuffer.setText(QtGui.QApplication.translate("Dialog", "Override BufferSize", None, QtGui.QApplication.UnicodeUTF8))
+	self.MiscBox.setTitle(QtGui.QApplication.translate("Dialog", "light control options", None, QtGui.QApplication.UnicodeUTF8))
+
+	self.groupBox.setTitle(QtGui.QApplication.translate("Dialog", "Misc options", None, QtGui.QApplication.UnicodeUTF8))
+	self.addBookmarkCheckBox.setText(QtGui.QApplication.translate("Dialog", "Add Bookmarks", None, QtGui.QApplication.UnicodeUTF8))
+	self.checkBox_overrideBuffer.setText(QtGui.QApplication.translate("Dialog", "override BufferSize", None, QtGui.QApplication.UnicodeUTF8))
+	
     
-
+class TemplateControlPageWidget(QtGui.QWidget):
+    
+    
+    def __init__(self):
+	super(TemplateControlPageWidget, self).__init__()
+	self.Setupwidget()
+    
+    def IsEnabled(self):
+	return self.groupBox_control.isChecked()
+    
+    
+    def IsFreqEnable(self):
+	return self.freq_checkBox.isChecked()
+    
+    def GetFreqRange(self):
+	return self.MinFreq_doubleSpinBox.value(), self.MaxFreq_doubleSpinBox.value()    
+    
+    def GetValueRange(self):
+	return self.doubleSpinBox_minvalue.value(), self.doubleSpinBox_maxvalue.value()
+    
+    def ValadateRange(self,this,minspinn,maxspin):
+	if this==minspinn:
+	    if minspinn.value()>maxspin.value():
+		minspinn.setValue(maxspin.value())
+	else:
+	    if maxspin.value()<minspinn.value():
+		maxspin.setValue(minspinn.value())
+	
+    
+    def Setupwidget(self):
+	
+	self.setGeometry(QtCore.QRect(0, 0, 604, 116))
+	self.setObjectName("page_control_setting")
+	self.gridLayout_2 = QtGui.QGridLayout(self)
+	self.gridLayout_2.setObjectName("gridLayout_2")
+	self.groupBox_control = QtGui.QGroupBox(self)
+	
+	self.groupBox_control.setCheckable(True)
+	self.groupBox_control.setChecked(False)
+	self.groupBox_control.setObjectName("groupBox_control")
+	self.gridLayout_3 = QtGui.QGridLayout(self.groupBox_control)
+	self.gridLayout_3.setObjectName("gridLayout_3")
+	self.doubleSpinBox_minvalue = QtGui.QDoubleSpinBox(self.groupBox_control)
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Fixed)
+	sizePolicy.setHorizontalStretch(0)
+	sizePolicy.setVerticalStretch(0)
+	sizePolicy.setHeightForWidth(self.doubleSpinBox_minvalue.sizePolicy().hasHeightForWidth())
+	self.doubleSpinBox_minvalue.setSizePolicy(sizePolicy)
+	self.doubleSpinBox_minvalue.setFrame(True)
+	self.doubleSpinBox_minvalue.setAccelerated(True)
+	self.doubleSpinBox_minvalue.setCorrectionMode(QtGui.QAbstractSpinBox.CorrectToNearestValue)
+	self.doubleSpinBox_minvalue.setDecimals(4)
+	self.doubleSpinBox_minvalue.setMaximum(1.0)
+	self.doubleSpinBox_minvalue.setSingleStep(0.01)
+	self.doubleSpinBox_minvalue.setObjectName("doubleSpinBox_minvalue")
+	self.gridLayout_3.addWidget(self.doubleSpinBox_minvalue, 1, 3, 1, 1)
+	self.label_6 = QtGui.QLabel(self.groupBox_control)
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Preferred)
+	sizePolicy.setHorizontalStretch(0)
+	sizePolicy.setVerticalStretch(0)
+	sizePolicy.setHeightForWidth(self.label_6.sizePolicy().hasHeightForWidth())
+	self.label_6.setSizePolicy(sizePolicy)
+	self.label_6.setAlignment(QtCore.Qt.AlignRight|QtCore.Qt.AlignTrailing|QtCore.Qt.AlignVCenter)
+	self.label_6.setObjectName("label_6")
+	self.gridLayout_3.addWidget(self.label_6, 1, 2, 1, 1)
+	self.label_7 = QtGui.QLabel(self.groupBox_control)
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Preferred)
+	sizePolicy.setHorizontalStretch(0)
+	sizePolicy.setVerticalStretch(0)
+	sizePolicy.setHeightForWidth(self.label_7.sizePolicy().hasHeightForWidth())
+	self.label_7.setSizePolicy(sizePolicy)
+	self.label_7.setAlignment(QtCore.Qt.AlignRight|QtCore.Qt.AlignTrailing|QtCore.Qt.AlignVCenter)
+	self.label_7.setObjectName("label_7")
+	self.gridLayout_3.addWidget(self.label_7, 1, 4, 1, 1)
+	self.doubleSpinBox_maxvalue = QtGui.QDoubleSpinBox(self.groupBox_control)
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Fixed)
+	sizePolicy.setHorizontalStretch(0)
+	sizePolicy.setVerticalStretch(0)
+	sizePolicy.setHeightForWidth(self.doubleSpinBox_maxvalue.sizePolicy().hasHeightForWidth())
+	self.doubleSpinBox_maxvalue.setSizePolicy(sizePolicy)
+	self.doubleSpinBox_maxvalue.setWrapping(False)
+	self.doubleSpinBox_maxvalue.setFrame(True)
+	self.doubleSpinBox_maxvalue.setAccelerated(True)
+	self.doubleSpinBox_maxvalue.setCorrectionMode(QtGui.QAbstractSpinBox.CorrectToNearestValue)
+	self.doubleSpinBox_maxvalue.setDecimals(4)
+	self.doubleSpinBox_maxvalue.setMaximum(1.0)
+	self.doubleSpinBox_maxvalue.setSingleStep(0.01)
+	self.doubleSpinBox_maxvalue.setProperty("value", 1.0)
+	self.doubleSpinBox_maxvalue.setObjectName("doubleSpinBox_maxvalue")
+	self.gridLayout_3.addWidget(self.doubleSpinBox_maxvalue, 1, 5, 1, 1)
+	self.freq_checkBox = QtGui.QCheckBox(self.groupBox_control)
+	self.freq_checkBox.setObjectName("freq_checkBox")
+	self.gridLayout_3.addWidget(self.freq_checkBox, 0, 1, 1, 1)
+	self.label = QtGui.QLabel(self.groupBox_control)
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Fixed, QtGui.QSizePolicy.Preferred)
+	sizePolicy.setHorizontalStretch(0)
+	sizePolicy.setVerticalStretch(0)
+	sizePolicy.setHeightForWidth(self.label.sizePolicy().hasHeightForWidth())
+	self.label.setSizePolicy(sizePolicy)
+	self.label.setObjectName("label")
+	self.gridLayout_3.addWidget(self.label, 1, 1, 1, 1)
+	self.MinFreq_doubleSpinBox = QtGui.QDoubleSpinBox(self.groupBox_control)
+	self.MinFreq_doubleSpinBox.setEnabled(False)
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Maximum, QtGui.QSizePolicy.Fixed)
+	sizePolicy.setHorizontalStretch(0)
+	sizePolicy.setVerticalStretch(0)
+	sizePolicy.setHeightForWidth(self.MinFreq_doubleSpinBox.sizePolicy().hasHeightForWidth())
+	self.MinFreq_doubleSpinBox.setSizePolicy(sizePolicy)
+	self.MinFreq_doubleSpinBox.setReadOnly(False)
+	self.MinFreq_doubleSpinBox.setCorrectionMode(QtGui.QAbstractSpinBox.CorrectToNearestValue)
+	self.MinFreq_doubleSpinBox.setMinimum(1.0)
+	self.MinFreq_doubleSpinBox.setMaximum(30000.0)
+	self.MinFreq_doubleSpinBox.setSingleStep(10.0)
+	self.MinFreq_doubleSpinBox.setProperty("value", 100.0)
+	self.MinFreq_doubleSpinBox.setObjectName("MinFreq_doubleSpinBox")
+	self.gridLayout_3.addWidget(self.MinFreq_doubleSpinBox, 0, 3, 1, 1)
+	self.MaxFreq_doubleSpinBox = QtGui.QDoubleSpinBox(self.groupBox_control)
+	self.MaxFreq_doubleSpinBox.setEnabled(False)
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Maximum, QtGui.QSizePolicy.Fixed)
+	sizePolicy.setHorizontalStretch(0)
+	sizePolicy.setVerticalStretch(0)
+	sizePolicy.setHeightForWidth(self.MaxFreq_doubleSpinBox.sizePolicy().hasHeightForWidth())
+	self.MaxFreq_doubleSpinBox.setSizePolicy(sizePolicy)
+	self.MaxFreq_doubleSpinBox.setCorrectionMode(QtGui.QAbstractSpinBox.CorrectToNearestValue)
+	self.MaxFreq_doubleSpinBox.setMinimum(1.0)
+	self.MaxFreq_doubleSpinBox.setMaximum(30000.0)
+	self.MaxFreq_doubleSpinBox.setSingleStep(10.0)
+	self.MaxFreq_doubleSpinBox.setProperty("value", 300.0)
+	self.MaxFreq_doubleSpinBox.setObjectName("MaxFreq_doubleSpinBox")
+	self.gridLayout_3.addWidget(self.MaxFreq_doubleSpinBox, 0, 5, 1, 1)
+	self.label_3 = QtGui.QLabel(self.groupBox_control)
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Preferred, QtGui.QSizePolicy.Preferred)
+	sizePolicy.setHorizontalStretch(0)
+	sizePolicy.setVerticalStretch(0)
+	sizePolicy.setHeightForWidth(self.label_3.sizePolicy().hasHeightForWidth())
+	self.label_3.setSizePolicy(sizePolicy)
+	self.label_3.setAlignment(QtCore.Qt.AlignRight|QtCore.Qt.AlignTrailing|QtCore.Qt.AlignVCenter)
+	self.label_3.setObjectName("label_3")
+	self.gridLayout_3.addWidget(self.label_3, 0, 2, 1, 1)
+	self.label_4 = QtGui.QLabel(self.groupBox_control)
+	sizePolicy = QtGui.QSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Preferred)
+	sizePolicy.setHorizontalStretch(0)
+	sizePolicy.setVerticalStretch(0)
+	sizePolicy.setHeightForWidth(self.label_4.sizePolicy().hasHeightForWidth())
+	self.label_4.setSizePolicy(sizePolicy)
+	self.label_4.setAlignment(QtCore.Qt.AlignRight|QtCore.Qt.AlignTrailing|QtCore.Qt.AlignVCenter)
+	self.label_4.setObjectName("label_4")
+	self.gridLayout_3.addWidget(self.label_4, 0, 4, 1, 1)
+	self.gridLayout_2.addWidget(self.groupBox_control, 0, 1, 1, 1)    
+	QtCore.QObject.connect(self.freq_checkBox, QtCore.SIGNAL("toggled(bool)"), self.MinFreq_doubleSpinBox.setEnabled)
+	QtCore.QObject.connect(self.freq_checkBox, QtCore.SIGNAL("toggled(bool)"), self.MaxFreq_doubleSpinBox.setEnabled)
+	
+	self.MinFreq_doubleSpinBox.valueChanged.connect(lambda: self.ValadateRange(self.MinFreq_doubleSpinBox,self.MinFreq_doubleSpinBox,self.MaxFreq_doubleSpinBox)) 
+	self.MaxFreq_doubleSpinBox.valueChanged.connect(lambda: self.ValadateRange(self.MaxFreq_doubleSpinBox,self.MinFreq_doubleSpinBox,self.MaxFreq_doubleSpinBox)) 
+	
+	self.doubleSpinBox_minvalue.valueChanged.connect(lambda: self.ValadateRange(self.doubleSpinBox_minvalue,self.doubleSpinBox_minvalue,self.doubleSpinBox_maxvalue)) 
+	self.doubleSpinBox_maxvalue.valueChanged.connect(lambda: self.ValadateRange(self.doubleSpinBox_maxvalue,self.doubleSpinBox_minvalue,self.doubleSpinBox_maxvalue)) 	
+    
+    
+    
+	self.groupBox_control.setTitle(QtGui.QApplication.translate("Dialog", "Enable", None, QtGui.QApplication.UnicodeUTF8))
+	self.label_6.setText(QtGui.QApplication.translate("Dialog", "min", None, QtGui.QApplication.UnicodeUTF8))
+	self.label_7.setText(QtGui.QApplication.translate("Dialog", "max", None, QtGui.QApplication.UnicodeUTF8))
+	self.freq_checkBox.setText(QtGui.QApplication.translate("Dialog", "Use freq range", None, QtGui.QApplication.UnicodeUTF8))
+	self.label.setText(QtGui.QApplication.translate("Dialog", "Slider Value Range", None, QtGui.QApplication.UnicodeUTF8))
+	self.MinFreq_doubleSpinBox.setSuffix(QtGui.QApplication.translate("Dialog", "Hz", None, QtGui.QApplication.UnicodeUTF8))
+	self.MaxFreq_doubleSpinBox.setSuffix(QtGui.QApplication.translate("Dialog", "Hz", None, QtGui.QApplication.UnicodeUTF8))
+	self.label_3.setText(QtGui.QApplication.translate("Dialog", "min", None, QtGui.QApplication.UnicodeUTF8))
+	self.label_4.setText(QtGui.QApplication.translate("Dialog", "max", None, QtGui.QApplication.UnicodeUTF8))
+	#self.control_toolBox.setItemText(self.control_toolBox.indexOf(self.page_control_setting), QtGui.QApplication.translate("Dialog", "control name", None, QtGui.QApplication.UnicodeUTF8))    
+    
+    
+    
 
 
 audioscript = Audio_Dialog()
